@@ -4,7 +4,7 @@ name: Run main.py (Daily + Manual)
 on:
   schedule:
     - cron: "0 2 * * *"      # 09:00 Asia/Bangkok
-  workflow_dispatch:         # ให้กด Run workflow ได้
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -12,6 +12,10 @@ permissions:
 jobs:
   run-main:
     runs-on: ubuntu-latest
+
+    # ผูก secret ไว้กับ env เพื่อใช้เช็คใน if (หลีกเลี่ยง error 'secrets' ใน if:)
+    env:
+      HAS_GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
 
     steps:
       - name: Checkout
@@ -27,9 +31,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ✅ จุดที่เคย error — ต้องใส่ ${{ ... }} ครอบ secrets
+      # ✅ เช็คผ่าน env.HAS_GCP_SA_KEY แทน (จะไม่ error แม้ secret ว่าง/ไม่มี)
       - name: Create GCP key file from secret (optional)
-        if: ${{ secrets.GCP_SA_KEY != '' }}
+        if: ${{ env.HAS_GCP_SA_KEY != '' }}
         run: |
           cat > gcp_service_account.json <<'JSON'
           ${{ secrets.GCP_SA_KEY }}
@@ -61,5 +65,5 @@ jobs:
           git push || echo "No push"
 
       - name: Clean up key
-        if: ${{ secrets.GCP_SA_KEY != '' }}
-        run: rm -f gcp_service_account.json || true
+        if: ${{ env.HAS_GCP_SA_KEY != '' }}
+        ru
