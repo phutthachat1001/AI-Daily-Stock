@@ -10,13 +10,9 @@ AI Daily Stock Insight with News Impact
 - Export rows to Google Sheet (Service Account)
 - (Optional) Generate PNG charts per ticker into reports/
 
-Environment:
+Env:
 - GEMINI_API_KEY : Gemini key
 - SHEET_ID       : Google Spreadsheet ID (optional; if empty, skip Sheet export)
-
-Files:
-- config.yml (see earlier message)
-- gcp_service_account.json (created in workflow from GitHub Secret)
 
 Note: For education only, not investment advice.
 """
@@ -67,7 +63,6 @@ def load_config(path="config.yml"):
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             user = yaml.safe_load(f) or {}
-        # shallow merge
         for k, v in default.items():
             if k not in user:
                 user[k] = v
@@ -119,7 +114,6 @@ def pct_change(series, periods=1):
 
 # ------------------ Data Fetch ------------------
 def fetch_history(ticker, lookback_days=260):
-    # wider period to cover non-trading days
     df = yf.download(ticker, period="400d", interval="1d", auto_adjust=False, progress=False)
     if df is None or df.empty:
         return pd.DataFrame()
@@ -142,10 +136,7 @@ COMPANY_NAME = {
 
 # ------------------ News fetchers ------------------
 def fetch_news_google(query, days=2, max_items=3, lang="en-US", country="US"):
-    """
-    Google News RSS via feedparser
-    ex: query="Tesla TSLA stock when:2d"
-    """
+    """Google News RSS via feedparser"""
     try:
         q = f"{query} stock OR shares when:{days}d"
         url = (
@@ -166,7 +157,7 @@ def fetch_news_google(query, days=2, max_items=3, lang="en-US", country="US"):
         return []
 
 def fetch_news_yfinance(ticker, days=2, max_items=3):
-    """Fallback: yfinance.Ticker(t).news (if available)"""
+    """Fallback: yfinance.Ticker(t).news"""
     try:
         news = yf.Ticker(ticker).news
         if not news:
@@ -205,8 +196,6 @@ def build_features(ticker, df):
         return None
 
     close = df["Close"]
-    high = df["High"]
-    low = df["Low"]
 
     out = {}
     out["ticker"] = ticker
@@ -257,63 +246,26 @@ def build_ai_prompt(config, market_overview, features_list, news_map):
     dsl = risk.get("default_stop_loss_pct", 0.03)
     dtp = risk.get("default_take_profit_pct", 0.06)
 
-    sys = f"""
-You are a stock analyst. Based on technical metrics and provided headlines, output STRICT JSON only.
+    # ---- PREPARE BLOCKS to avoid backslashes inside f-string expressions ----
+    # Market overview (single line, no backslash)
+    overview_joined = "; ".join(
+        f"{k}:{item['ticker']} p={fmt_price(item['price'])} 1d={fmt_pct(item['chg_1d'])} rsi={item['rsi14']:.1f} trend={item['trend_sma']}"
+        for k, arr in market_overview.items() if arr
+        for item in arr
+    ) or "-"
 
-Schema:
-{{
-  "date": "YYYY-MM-DD",
-  "tickers": [
-    {{
-      "ticker": "TSLA",
-      "stance": "Buy|Sell|Hold",
-      "confidence": 0-100,
-      "entry_rule": "short rule in Thai",
-      "entry_price_range": "e.g., 240-245 or '-'",
-      "stop_loss": "price or percent string",
-      "take_profit": "price or percent string",
-      "timeframe": "days|weeks",
-      "reasoning_bullets": ["สั้นๆ 2-4 ข้ออ้างอิงตัวเลข indicator"],
-      "positive_factors": ["2-4 ข่าว/ปัจจัยที่สนับสนุนราคาขึ้น (ไทย) หรือ '-'"],
-      "negative_factors": ["2-4 ข่าว/ปัจจัยที่กดดันราคาลง (ไทย) หรือ '-'"],
-      "news_refs": ["หัวข้อข่าวที่ใช้อ้างอิง"]
-    }}
-  ],
-  "notes": "optional"
-}}
-
-Rules:
-- วิเคราะห์จากตัวเลข indicators (SMA/RSI/MACD/52w) + headlines ข่าวที่ให้มาเท่านั้น
-- แยก positive_factors และ negative_factors อย่างละอย่างน้อย 2 ข้อ หากไม่พบให้ใช้ "-"
-- ใช้ภาษาไทย กระชับ ชัดเจน
-- หลีกเลี่ยงการแต่งข้อมูลเอง (no hallucination)
-- หากไม่แน่ใจราคา SL/TP ให้ใช้ defaults: SL {dsl:.2%}, TP {dtp:.2%}
-- Output เป็น JSON ล้วน (ไม่มี Markdown/โค้ดบล็อก)
-"""
-
-    # market overview lines
-    overview_lines = []
-    for k, arr in market_overview.items():
-        if not arr:
-            continue
-        for item in arr:
-            overview_lines.append(
-                f"{k}:{item['ticker']} p={fmt_price(item['price'])} 1d={fmt_pct(item['chg_1d'])} rsi={item['rsi14']:.1f} trend={item['trend_sma']}"
-            )
-
-    # features lines
+    # Features block: bullet list with newline prepared beforehand
     feat_lines = []
     for f in features_list:
-        if not f:
-            continue
         feat_lines.append(
             f"{f['ticker']} price={fmt_price(f['price'])} 1d={fmt_pct(f['chg_1d'])} 5d={fmt_pct(f['chg_5d'])} 20d={fmt_pct(f['chg_20d'])} "
             f"SMA20/50/200={fmt_price(f['sma20'])}/{fmt_price(f['sma50'])}/{fmt_price(f['sma200'])} "
             f"RSI14={f['rsi14']:.1f}({f['rsi_state']}) MACD={f['macd']:.3f}/{f['macd_signal']:.3f}({f['macd_state']}) "
             f"52wH/L={fmt_price(f['high_52w'])}/{fmt_price(f['low_52w'])} offHigh={fmt_pct(f['off_high_52w_pct'])}"
         )
+    feat_block = "- " + "\n- ".join(feat_lines) if feat_lines else "-"
 
-    # news lines
+    # News block: bullet list with newline prepared beforehand
     news_lines = []
     for t, items in news_map.items():
         if not items:
@@ -322,26 +274,57 @@ Rules:
             title = it.get("title", "")
             link = it.get("link", "")
             news_lines.append(f"{t} NEWS{i}: {title} | {link}")
+    news_block = "- " + "\n- ".join(news_lines) if news_lines else "-"
 
-    user = f"""
-วันที่: {today}
+    # ---------------- SYSTEM PROMPT ----------------
+    sys = (
+        "You are a stock analyst. Based on technical metrics and provided headlines, output STRICT JSON only.\n\n"
+        "Schema:\n"
+        "{\n"
+        '  "date": "YYYY-MM-DD",\n'
+        '  "tickers": [\n'
+        "    {\n"
+        '      "ticker": "TSLA",\n'
+        '      "stance": "Buy|Sell|Hold",\n'
+        '      "confidence": 0-100,\n'
+        '      "entry_rule": "short rule in Thai",\n'
+        '      "entry_price_range": "e.g., 240-245 or \'-\'",\n'
+        '      "stop_loss": "price or percent string",\n'
+        '      "take_profit": "price or percent string",\n'
+        '      "timeframe": "days|weeks",\n'
+        '      "reasoning_bullets": ["สั้นๆ 2-4 ข้ออ้างอิงตัวเลข indicator"],\n'
+        '      "positive_factors": ["2-4 ข่าว/ปัจจัยที่สนับสนุนราคาขึ้น (ไทย) หรือ \'-\'"],\n'
+        '      "negative_factors": ["2-4 ข่าว/ปัจจัยที่กดดันราคาลง (ไทย) หรือ \'-\'"],\n'
+        '      "news_refs": ["หัวข้อข่าวที่ใช้อ้างอิง"]\n'
+        "    }\n"
+        "  ],\n"
+        '  "notes": "optional"\n'
+        "}\n\n"
+        "Rules:\n"
+        "- วิเคราะห์จากตัวเลข indicators (SMA/RSI/MACD/52w) + headlines ข่าวที่ให้มาเท่านั้น\n"
+        "- แยก positive_factors และ negative_factors อย่างละอย่างน้อย 2 ข้อ หากไม่พบให้ใช้ \"-\"\n"
+        "- ใช้ภาษาไทย กระชับ ชัดเจน\n"
+        "- หลีกเลี่ยงการแต่งข้อมูลเอง (no hallucination)\n"
+        f"- หากไม่แน่ใจราคา SL/TP ให้ใช้ defaults: SL {dsl:.2%}, TP {dtp:.2%}\n"
+        "- Output เป็น JSON ล้วน (ไม่มี Markdown/โค้ดบล็อก)\n"
+    )
 
-ภาพรวมตลาด (ย่อ):
-- {'; '.join(overview_lines) if overview_lines else '-'}
+    # ---------------- USER PROMPT ----------------
+    user = (
+        f"วันที่: {today}\n\n"
+        "ภาพรวมตลาด (ย่อ):\n"
+        f"- {overview_joined}\n\n"
+        "หุ้นที่จะวิเคราะห์:\n"
+        f"{feat_block}\n\n"
+        "หัวข้อข่าวต่อหุ้น (สำหรับ positive/negative_factors):\n"
+        f"{news_block}\n\n"
+        "งานของคุณ:\n"
+        "- ให้คำแนะนำ Buy/Sell/Hold + แผนเข้า-ออก\n"
+        "- แยกปัจจัยบวก/ลบ หลายข้อ โดยอ้างอิงหัวข้อข่าวด้านบนและตัวเลขอินดิเคเตอร์\n"
+        "- ส่งออก JSON ตามสคีม (ห้ามมีข้อความอื่น)\n"
+    )
 
-หุ้นที่จะวิเคราะห์:
-- {'\n- '.join(feat_lines) if feat_lines else '-'}
-
-หัวข้อข่าวต่อหุ้น (สำหรับ positive/negative_factors):
-- {'\n- '.join(news_lines) if news_lines else '-'}
-
-งานของคุณ:
-- ให้คำแนะนำ Buy/Sell/Hold + แผนเข้า-ออก
-- แยกปัจจัยบวก/ลบ หลายข้อ โดยอ้างอิงหัวข้อข่าวด้านบนและตัวเลขอินดิเคเตอร์
-- ส่งออก JSON ตามสคีม (ห้ามมีข้อความอื่น)
-""".strip()
-
-    return sys.strip(), user.strip()
+    return sys, user
 
 def call_gemini(model_name, system_prompt, user_prompt):
     key = os.getenv("GEMINI_API_KEY", "").strip()
@@ -457,14 +440,12 @@ def render_report(date_str, overview, features, ai_json, news_map):
         md.append(f"  - Entry: {r.get('entry_rule','-')} | ช่วงราคาเข้า: {r.get('entry_price_range','-')}")
         md.append(f"  - Stop Loss: {r.get('stop_loss','-')} | Take Profit: {r.get('take_profit','-')} | Timeframe: {r.get('timeframe','-')}")
 
-        # เหตุผลเชิงเทคนิค
         bullets = r.get("reasoning_bullets", [])
         if bullets:
             md.append("  - เหตุผล (เทคนิค):")
             for b in bullets:
                 md.append(f"    - {b}")
 
-        # ปัจจัยบวก/ลบ
         pos = r.get("positive_factors", [])
         neg = r.get("negative_factors", [])
         if pos and pos != "-":
@@ -476,7 +457,6 @@ def render_report(date_str, overview, features, ai_json, news_map):
             for b in neg:
                 md.append(f"- {b}")
 
-        # ข่าวที่อ้างอิง
         items = news_map.get(f["ticker"], [])
         if items:
             md.append("\n**หัวข้อข่าวล่าสุด:**")
@@ -519,7 +499,6 @@ def main():
     tz = config.get("timezone", "Asia/Bangkok")
     now = datetime.now(ZoneInfo(tz))
 
-    # skip weekends in local timezone if configured
     if config.get("skip_if_weekend", True) and now.weekday() >= 5:
         print("Weekend — skipped.")
         return
@@ -534,14 +513,12 @@ def main():
     fx = config.get("fx", ["DX-Y.NYB","EURUSD=X"])
     cfg_news = config.get("news", {"enable": True, "lookback_days": 2, "per_ticker": 3})
 
-    # Market overview
     overview = {
         "indices": to_overview_block(indices, lookback),
         "commodities": to_overview_block(commodities, lookback),
         "fx": to_overview_block(fx, lookback),
     }
 
-    # Stock features
     features = []
     hist_cache = {}
     for t in tickers:
@@ -554,7 +531,6 @@ def main():
     if not features:
         raise RuntimeError("No feature data built; check tickers or network")
 
-    # Fetch news per ticker
     news_map = {}
     if cfg_news.get("enable", True):
         for f in features:
@@ -562,16 +538,13 @@ def main():
             company = COMPANY_NAME.get(t, t)
             news_map[t] = fetch_news_for_ticker(t, company, cfg_news)
 
-    # Build prompt & call Gemini (batch)
     sys, usr = build_ai_prompt(config, overview, features, news_map)
     model_name = config.get("gemini_model", "gemini-2.5-flash")
     ai_json = call_gemini(model_name, sys, usr)
 
-    # Render report
     report_date = now.strftime("%Y-%m-%d")
     ensure_dir("reports")
 
-    # (Optional) Charts
     if config.get("charts", {}).get("enable", True) and plt is not None:
         for f in features:
             t = f["ticker"]
@@ -587,7 +560,6 @@ def main():
 
     print("Report generated:", report_date)
 
-    # Export to Google Sheet (optional)
     sheet_id = os.getenv("SHEET_ID", "").strip()
     if sheet_id and os.path.exists("gcp_service_account.json"):
         try:
