@@ -2,7 +2,7 @@ google-generativeai==0.7.2
 pandas==2.2.2
 numpy==1.26.4
 PyYAML==6.0.2
-matplotlib==3.9.0         # ถ้าอยากสร้างกราฟ .png
-gspread==6.1.2            # ถ้าจะเขียน Google Sheet
-oauth2client==4.1.3       # ถ้าจะเขียน Google Sheet
-requests==2.32.3          # ใช้เรียก Finnhub
+matplotlib==3.9.0         
+gspread==6.1.2           
+oauth2client==4.1.3       
+requests==2.32.3          
