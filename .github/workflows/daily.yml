@@ -12,7 +12,8 @@ jobs:
   run-daily:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -37,4 +38,3 @@ jobs:
           git add reports/*.md || true
           git commit -m "chore: daily report $(date -u +'%Y-%m-%d')" || echo "No changes"
           git push || echo "No push"
-
