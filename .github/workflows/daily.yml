@@ -1,22 +1,22 @@
-name: Daily AI Stock Insight
+# .github/workflows/daily.yml
+name: Run main.py (Daily + Manual)
 
 on:
   schedule:
-    - cron: "0 2 * * *"   # 09:00 Asia/Bangkok
-  workflow_dispatch:
+    - cron: "0 2 * * *"      # 09:00 Asia/Bangkok
+  workflow_dispatch:         # ทำให้กด Run workflow ได้
 
 permissions:
   contents: write
 
 jobs:
-  run-daily:
+  run-main:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -26,27 +26,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # (ออปชัน) สร้างไฟล์กุญแจจาก Secret ถ้าจะเขียน Google Sheet
-      - name: Create GCP key file from secret
+      - name: Create GCP key file (optional)
         if: ${{ secrets.GCP_SA_KEY != '' }}
         run: |
           cat > gcp_service_account.json <<'JSON'
           ${{ secrets.GCP_SA_KEY }}
           JSON
           chmod 600 gcp_service_account.json || true
-          python - <<'PY'
-          import json
-          json.load(open('gcp_service_account.json'))
-          print('GCP key file looks valid.')
-          PY
 
-      - name: Run main
+      - name: Debug echo (เห็นใน UI ทันที)
+        run: echo "Workflow triggered at $(date -u) by $GITHUB_ACTOR on $GITHUB_REF"
+
+      - name: Run main.py
         env:
           GEMINI_API_KEY:  ${{ secrets.GEMINI_API_KEY }}
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
           SHEET_ID:        ${{ secrets.SHEET_ID }}
-        run: |
-          python main.py
+        run: python main.py
 
       - name: Commit & Push reports
         run: |
@@ -56,7 +52,3 @@ jobs:
           git add reports/*.png || true
           git commit -m "chore: daily report $(date -u +'%Y-%m-%d')" || echo "No changes"
           git push || echo "No push"
-
-      - name: Clean up key (optional)
-        if: always()
-        run: rm -f gcp_service_account.json || true
