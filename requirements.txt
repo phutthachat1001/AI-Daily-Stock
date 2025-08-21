@@ -1,1 +1,6 @@
-
+google-generativeai==0.7.2
+yfinance==0.2.43
+pandas==2.2.2
+numpy==1.26.4
+PyYAML==6.0.2
+feedparser==6.0.11
