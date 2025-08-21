@@ -1,1 +1,41 @@
+timezone: "Asia/Bangkok"
+skip_if_weekend: true
+
+tickers:
+  - "TSLA"
+  - "NVDA"
+  - "AAPL"
+  - "MSFT"
+  - "AMZN"
+  - "ALAB"   # Astera Labs
+  - "PLTR"
+  - "TSM"
+  - "AMD"
+  - "RKLB"
+
+indices:
+  - "^GSPC"   # S&P 500
+  - "^NDX"    # Nasdaq-100
+
+commodities:
+  - "CL=F"    # WTI
+  - "BZ=F"    # Brent
+
+fx:
+  - "DXY"     # ดัชนีดอลลาร์ (ไม่เสมอว่ามีใน yfinance ทุกสภาพแวดล้อม ถ้า error ให้ลบออก)
+  - "EURUSD=X"
+
+lookback_days: 260
+report_top_n: 999
+gemini_model: "gemini-2.5-flash"
+
+news:
+  enable: true
+  lookback_days: 2         # ข่าวย้อนหลังกี่วัน
+  per_ticker: 3            # ข่าวต่อหุ้น
+  prefer: "google_news"    # google_news → yfinance (fallback)
+
+risk_management:
+  default_stop_loss_pct: 0.03
+  default_take_profit_pct: 0.06
 
