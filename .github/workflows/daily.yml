@@ -4,7 +4,7 @@ name: Run main.py (Daily + Manual)
 on:
   schedule:
     - cron: "0 2 * * *"      # 09:00 Asia/Bangkok
-  workflow_dispatch:         # ทำให้กด Run workflow ได้
+  workflow_dispatch:         # ให้กด Run workflow ได้
 
 permissions:
   contents: write
@@ -12,6 +12,7 @@ permissions:
 jobs:
   run-main:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,21 +22,27 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Create GCP key file (optional)
+      # ✅ จุดที่เคย error — ต้องใส่ ${{ ... }} ครอบ secrets
+      - name: Create GCP key file from secret (optional)
         if: ${{ secrets.GCP_SA_KEY != '' }}
         run: |
           cat > gcp_service_account.json <<'JSON'
           ${{ secrets.GCP_SA_KEY }}
           JSON
           chmod 600 gcp_service_account.json || true
+          python - <<'PY'
+          import json
+          json.load(open('gcp_service_account.json'))
+          print('GCP key file looks valid.')
+          PY
 
-      - name: Debug echo (เห็นใน UI ทันที)
-        run: echo "Workflow triggered at $(date -u) by $GITHUB_ACTOR on $GITHUB_REF"
+      - name: Debug trigger
+        run: echo "Triggered by $GITHUB_EVENT_NAME at $(date -u)"
 
       - name: Run main.py
         env:
@@ -52,3 +59,7 @@ jobs:
           git add reports/*.png || true
           git commit -m "chore: daily report $(date -u +'%Y-%m-%d')" || echo "No changes"
           git push || echo "No push"
+
+      - name: Clean up key
+        if: ${{ secrets.GCP_SA_KEY != '' }}
+        run: rm -f gcp_service_account.json || true
