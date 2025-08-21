@@ -2,7 +2,7 @@ name: Daily AI Stock Insight
 
 on:
   schedule:
-    - cron: "0 2 * * *"  # 09:00 Asia/Bangkok
+    - cron: "0 2 * * *"   # 09:00 Asia/Bangkok
   workflow_dispatch:
 
 permissions:
@@ -11,6 +11,7 @@ permissions:
 jobs:
   run-daily:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,16 +26,37 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # (ออปชัน) สร้างไฟล์กุญแจจาก Secret ถ้าจะเขียน Google Sheet
+      - name: Create GCP key file from secret
+        if: ${{ secrets.GCP_SA_KEY != '' }}
+        run: |
+          cat > gcp_service_account.json <<'JSON'
+          ${{ secrets.GCP_SA_KEY }}
+          JSON
+          chmod 600 gcp_service_account.json || true
+          python - <<'PY'
+          import json
+          json.load(open('gcp_service_account.json'))
+          print('GCP key file looks valid.')
+          PY
+
       - name: Run main
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY:  ${{ secrets.GEMINI_API_KEY }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          SHEET_ID:        ${{ secrets.SHEET_ID }}
         run: |
           python main.py
 
-      - name: Commit & Push report
+      - name: Commit & Push reports
         run: |
-          git config --global user.name "github-actions"
+          git config --global user.name  "github-actions"
           git config --global user.email "actions@github.com"
           git add reports/*.md || true
+          git add reports/*.png || true
           git commit -m "chore: daily report $(date -u +'%Y-%m-%d')" || echo "No changes"
           git push || echo "No push"
+
+      - name: Clean up key (optional)
+        if: always()
+        run: rm -f gcp_service_account.json || true
