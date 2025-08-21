@@ -4,3 +4,5 @@ pandas==2.2.2
 numpy==1.26.4
 PyYAML==6.0.2
 feedparser==6.0.11
+gspread==6.1.2
+oauth2client==4.1.3
