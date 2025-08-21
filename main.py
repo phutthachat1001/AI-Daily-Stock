@@ -1,3 +1,26 @@
+# main.py
+# -*- coding: utf-8 -*-
+"""
+AI Daily Stock Insight with News Impact
+- Fetch prices (yfinance) + indicators
+- Fetch latest headlines per ticker (Google News RSS -> fallback yfinance)
+- Call Gemini (single batch) to output Buy/Sell/Hold + Entry/SL/TP + confidence
+- Summarize Positive/Negative factors (multi-bullet) per ticker
+- Write Markdown report
+- Export rows to Google Sheet (Service Account)
+- (Optional) Generate PNG charts per ticker into reports/
+
+Environment:
+- GEMINI_API_KEY : Gemini key
+- SHEET_ID       : Google Spreadsheet ID (optional; if empty, skip Sheet export)
+
+Files:
+- config.yml (see earlier message)
+- gcp_service_account.json (created in workflow from GitHub Secret)
+
+Note: For education only, not investment advice.
+"""
+
 import os
 import re
 import json
@@ -14,10 +37,42 @@ import yfinance as yf
 import feedparser
 import google.generativeai as genai
 
+# --- Optional chart backend for headless GitHub Actions ---
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+except Exception:
+    plt = None  # charts disabled if matplotlib not available
+
+# --- Optional Google Sheet export ---
+try:
+    import gspread
+    from oauth2client.service_account import ServiceAccountCredentials
+except Exception:
+    gspread = None
+    ServiceAccountCredentials = None
+
 # ------------------ Utils ------------------
 def load_config(path="config.yml"):
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    default = {
+        "timezone": "Asia/Bangkok",
+        "skip_if_weekend": True,
+        "lookback_days": 260,
+        "gemini_model": "gemini-2.5-flash",
+        "news": {"enable": True, "lookback_days": 2, "per_ticker": 3, "prefer": "google_news"},
+        "risk_management": {"default_stop_loss_pct": 0.03, "default_take_profit_pct": 0.06},
+        "charts": {"enable": True, "width": 900, "height": 400}
+    }
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            user = yaml.safe_load(f) or {}
+        # shallow merge
+        for k, v in default.items():
+            if k not in user:
+                user[k] = v
+        return user
+    return default
 
 def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
@@ -64,14 +119,14 @@ def pct_change(series, periods=1):
 
 # ------------------ Data Fetch ------------------
 def fetch_history(ticker, lookback_days=260):
-    # ใช้ period กว้างกว่า เผื่อวันหยุด/ไม่มีการซื้อขาย
+    # wider period to cover non-trading days
     df = yf.download(ticker, period="400d", interval="1d", auto_adjust=False, progress=False)
     if df is None or df.empty:
         return pd.DataFrame()
     df = df.tail(lookback_days)
     return df
 
-# ------------------ Company names (ข่าว) ------------------
+# ------------------ Company names (for news queries) ------------------
 COMPANY_NAME = {
     "TSLA": "Tesla",
     "NVDA": "Nvidia",
@@ -89,7 +144,7 @@ COMPANY_NAME = {
 def fetch_news_google(query, days=2, max_items=3, lang="en-US", country="US"):
     """
     Google News RSS via feedparser
-    ตัวอย่าง query: "Tesla TSLA stock when:2d"
+    ex: query="Tesla TSLA stock when:2d"
     """
     try:
         q = f"{query} stock OR shares when:{days}d"
@@ -111,9 +166,7 @@ def fetch_news_google(query, days=2, max_items=3, lang="en-US", country="US"):
         return []
 
 def fetch_news_yfinance(ticker, days=2, max_items=3):
-    """
-    Fallback: yfinance.Ticker(t).news (ถ้ามี)
-    """
+    """Fallback: yfinance.Ticker(t).news (if available)"""
     try:
         news = yf.Ticker(ticker).news
         if not news:
@@ -140,9 +193,7 @@ def fetch_news_for_ticker(ticker, company, cfg_news):
         return []
     days = int(cfg_news.get("lookback_days", 2))
     per_ticker = int(cfg_news.get("per_ticker", 3))
-    # 1) Google News
     items = fetch_news_google(f"{company} {ticker}", days=days, max_items=per_ticker)
-    # 2) Fallback: Yahoo Finance news
     if len(items) < per_ticker:
         extra = fetch_news_yfinance(ticker, days=days, max_items=(per_ticker - len(items)))
         items.extend(extra)
@@ -223,8 +274,8 @@ Schema:
       "take_profit": "price or percent string",
       "timeframe": "days|weeks",
       "reasoning_bullets": ["สั้นๆ 2-4 ข้ออ้างอิงตัวเลข indicator"],
-      "positive_factors": ["2-4 ข่าว/ปัจจัยที่สนับสนุนราคาขึ้น (ไทย)"],
-      "negative_factors": ["2-4 ข่าว/ปัจจัยที่กดดันราคาลง (ไทย)"],
+      "positive_factors": ["2-4 ข่าว/ปัจจัยที่สนับสนุนราคาขึ้น (ไทย) หรือ '-'"],
+      "negative_factors": ["2-4 ข่าว/ปัจจัยที่กดดันราคาลง (ไทย) หรือ '-'"],
       "news_refs": ["หัวข้อข่าวที่ใช้อ้างอิง"]
     }}
   ],
@@ -232,8 +283,8 @@ Schema:
 }}
 
 Rules:
-- วิเคราะห์จากทั้งตัวเลข indicators (SMA/RSI/MACD/52w) และ headlines ข่าวที่ให้มา
-- แยก positive_factors และ negative_factors อย่างละอย่างน้อย 2 ข้อ (ถ้าไม่พบให้ใส่ "-")
+- วิเคราะห์จากตัวเลข indicators (SMA/RSI/MACD/52w) + headlines ข่าวที่ให้มาเท่านั้น
+- แยก positive_factors และ negative_factors อย่างละอย่างน้อย 2 ข้อ หากไม่พบให้ใช้ "-"
 - ใช้ภาษาไทย กระชับ ชัดเจน
 - หลีกเลี่ยงการแต่งข้อมูลเอง (no hallucination)
 - หากไม่แน่ใจราคา SL/TP ให้ใช้ defaults: SL {dsl:.2%}, TP {dtp:.2%}
@@ -281,7 +332,7 @@ Rules:
 หุ้นที่จะวิเคราะห์:
 - {'\n- '.join(feat_lines) if feat_lines else '-'}
 
-หัวข้อข่าวต่อหุ้น (ใช้เป็นบริบทสำหรับ positive/negative_factors):
+หัวข้อข่าวต่อหุ้น (สำหรับ positive/negative_factors):
 - {'\n- '.join(news_lines) if news_lines else '-'}
 
 งานของคุณ:
@@ -300,7 +351,6 @@ def call_gemini(model_name, system_prompt, user_prompt):
     model = genai.GenerativeModel(model_name)
     resp = model.generate_content([{"role":"user","parts":[system_prompt + "\n\n" + user_prompt]}])
     text = (resp.text or "").strip().strip("`")
-    # พยายาม parse JSON ให้แน่ใจว่าไม่มีโค้ดบล็อก
     try:
         return json.loads(text)
     except Exception:
@@ -308,6 +358,61 @@ def call_gemini(model_name, system_prompt, user_prompt):
         if m:
             return json.loads(m.group(0))
         raise
+
+# ------------------ Charts ------------------
+def plot_stock(ticker, df, f, out_path):
+    if plt is None or df.empty:
+        return
+    try:
+        fig = plt.figure(figsize=(10, 4.5))
+        ax = plt.gca()
+        ax.plot(df.index, df["Close"], label="Close")
+        ax.plot(df.index, df["Close"].rolling(20).mean(), label="SMA20")
+        ax.plot(df.index, df["Close"].rolling(50).mean(), label="SMA50")
+        if len(df) >= 200:
+            ax.plot(df.index, df["Close"].rolling(200).mean(), label="SMA200")
+        ax.set_title(f"{ticker} — Price & SMA")
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(out_path)
+        plt.close(fig)
+    except Exception:
+        pass
+
+# ------------------ Google Sheet ------------------
+def connect_google_sheet(json_keyfile: str, spreadsheet_name_or_id: str, use_by_key=True):
+    if gspread is None or ServiceAccountCredentials is None:
+        raise RuntimeError("gspread/oauth2client not installed")
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds = ServiceAccountCredentials.from_json_keyfile_name(json_keyfile, scope)
+    client = gspread.authorize(creds)
+    sh = client.open_by_key(spreadsheet_name_or_id) if use_by_key else client.open(spreadsheet_name_or_id)
+    try:
+        ws = sh.worksheet("Data")
+    except gspread.WorksheetNotFound:
+        ws = sh.sheet1
+    return ws
+
+def export_to_sheet(ws, date_str, features, ai_json):
+    rec_map = {t["ticker"]: t for t in ai_json.get("tickers", [])}
+    rows = []
+    for f in features:
+        r = rec_map.get(f["ticker"], {})
+        rows.append([
+            date_str,
+            f["ticker"],
+            f["price"],
+            r.get("stance","-"),
+            r.get("confidence","-"),
+            f.get("rsi14",""),
+            f.get("sma50",""),
+            "; ".join(r.get("positive_factors", []) or []),
+            "; ".join(r.get("negative_factors", []) or []),
+        ])
+    ws.append_rows(rows, value_input_option="RAW")
 
 # ------------------ Report ------------------
 def render_report(date_str, overview, features, ai_json, news_map):
@@ -362,11 +467,11 @@ def render_report(date_str, overview, features, ai_json, news_map):
         # ปัจจัยบวก/ลบ
         pos = r.get("positive_factors", [])
         neg = r.get("negative_factors", [])
-        if pos:
+        if pos and pos != "-":
             md.append("\n**ปัจจัยบวก (Positive Factors):**")
             for b in pos:
                 md.append(f"- {b}")
-        if neg:
+        if neg and neg != "-":
             md.append("**ปัจจัยลบ (Negative Factors):**")
             for b in neg:
                 md.append(f"- {b}")
@@ -414,17 +519,19 @@ def main():
     tz = config.get("timezone", "Asia/Bangkok")
     now = datetime.now(ZoneInfo(tz))
 
-    # ข้ามวันเสาร์-อาทิตย์ (ถ้าตั้งค่าไว้)
+    # skip weekends in local timezone if configured
     if config.get("skip_if_weekend", True) and now.weekday() >= 5:
         print("Weekend — skipped.")
         return
 
     lookback = int(config.get("lookback_days", 260))
 
-    tickers = config.get("tickers", [])
-    indices = config.get("indices", [])
-    commodities = config.get("commodities", [])
-    fx = config.get("fx", [])
+    tickers = config.get("tickers", [
+        "TSLA","NVDA","AAPL","MSFT","AMZN","ALAB","PLTR","TSM","AMD","RKLB"
+    ])
+    indices = config.get("indices", ["^GSPC","^NDX"])
+    commodities = config.get("commodities", ["CL=F","BZ=F"])
+    fx = config.get("fx", ["DX-Y.NYB","EURUSD=X"])
     cfg_news = config.get("news", {"enable": True, "lookback_days": 2, "per_ticker": 3})
 
     # Market overview
@@ -436,8 +543,10 @@ def main():
 
     # Stock features
     features = []
+    hist_cache = {}
     for t in tickers:
         df = fetch_history(t, lookback)
+        hist_cache[t] = df
         f = build_features(t, df)
         if f:
             features.append(f)
@@ -445,7 +554,7 @@ def main():
     if not features:
         raise RuntimeError("No feature data built; check tickers or network")
 
-    # Fetch news (compact) per ticker
+    # Fetch news per ticker
     news_map = {}
     if cfg_news.get("enable", True):
         for f in features:
@@ -460,16 +569,35 @@ def main():
 
     # Render report
     report_date = now.strftime("%Y-%m-%d")
-    md = render_report(report_date, overview, features, ai_json, news_map)
-
-    # Write reports
     ensure_dir("reports")
+
+    # (Optional) Charts
+    if config.get("charts", {}).get("enable", True) and plt is not None:
+        for f in features:
+            t = f["ticker"]
+            df = hist_cache.get(t) or fetch_history(t, lookback)
+            out_png = f"reports/{report_date}_{t}.png"
+            plot_stock(t, df, f, out_png)
+
+    md = render_report(report_date, overview, features, ai_json, news_map)
     with open(f"reports/{report_date}.md", "w", encoding="utf-8") as f:
         f.write(md)
     with open("reports/latest.md", "w", encoding="utf-8") as f:
         f.write(md)
 
     print("Report generated:", report_date)
+
+    # Export to Google Sheet (optional)
+    sheet_id = os.getenv("SHEET_ID", "").strip()
+    if sheet_id and os.path.exists("gcp_service_account.json"):
+        try:
+            ws = connect_google_sheet("gcp_service_account.json", sheet_id, use_by_key=True)
+            export_to_sheet(ws, report_date, features, ai_json)
+            print("Exported to Google Sheet")
+        except Exception as e:
+            print("Google Sheet export failed:", e)
+    else:
+        print("Skip Google Sheet export (missing SHEET_ID or key file).")
 
 if __name__ == "__main__":
     main()
