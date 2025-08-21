@@ -18,11 +18,12 @@ indices:
   - "^NDX"    # Nasdaq-100
 
 commodities:
-  - "CL=F"    # WTI
-  - "BZ=F"    # Brent
+  - "CL=F"    # WTI Crude
+  - "BZ=F"    # Brent Crude
 
 fx:
-  - "DXY"     # ดัชนีดอลลาร์ (ไม่เสมอว่ามีใน yfinance ทุกสภาพแวดล้อม ถ้า error ให้ลบออก)
+  # ถ้าโหลดไม่ได้ ให้ลบ DXY ออก หรือเปลี่ยนเป็น "DX-Y.NYB"
+  - "DX-Y.NYB"   # ICE US Dollar Index (ทางเลือกแทน DXY)
   - "EURUSD=X"
 
 lookback_days: 260
@@ -31,11 +32,10 @@ gemini_model: "gemini-2.5-flash"
 
 news:
   enable: true
-  lookback_days: 2         # ข่าวย้อนหลังกี่วัน
-  per_ticker: 3            # ข่าวต่อหุ้น
-  prefer: "google_news"    # google_news → yfinance (fallback)
+  lookback_days: 2     # ข่าวย้อนหลังกี่วัน
+  per_ticker: 3        # จำนวนหัวข้อข่าวต่อหุ้น
+  prefer: "google_news"  # google_news -> yfinance (fallback)
 
 risk_management:
   default_stop_loss_pct: 0.03
   default_take_profit_pct: 0.06
-
