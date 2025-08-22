@@ -1,39 +1,83 @@
-name: Run main.py (Daily + Manual)
+name: Daily AI Stock Insight
 
 on:
+  # เรียกเองได้จากหน้า Actions
+  workflow_dispatch: {}
+
+  # รันอัตโนมัติทุกวัน ~06:10 Asia/Bangkok (UTC+7 == 23:10 UTC ของวันก่อนหน้า)
   schedule:
-    - cron: "0 2 * * *"
-  workflow_dispatch:
+    - cron: '10 23 * * *'
+
+  # (ออปชัน) รันเมื่อแก้ไฟล์หลัก ๆ
+  push:
+    branches: [ main, master ]
+    paths:
+      - "main.py"
+      - "requirements.txt"
+      - "config.yml"
+      - ".github/workflows/daily.yml"
 
 jobs:
-  run-main:
+  build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: ai-daily-stock
+      cancel-in-progress: false
 
     env:
-      HAS_GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+      # Secrets ที่ต้องมีอย่างน้อย GEMINI_API_KEY
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      # ถ้าอยากเขียน Google Sheet ให้ใส่ SHEET_ID ใน repo secrets ด้วย (ปล่อยว่างได้)
+      SHEET_ID: ${{ secrets.SHEET_ID }}
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
+      # ดึงซอร์สโค้ดจาก repo
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Create GCP key file
-        if: ${{ env.HAS_GCP_SA_KEY != '' }}
+      # ถ้ามี GCP_KEY_B64 ใน Secrets จะถอดเป็นไฟล์ gcp_service_account.json ให้อัตโนมัติ
+      - name: Decode GCP service account key (optional)
+        if: ${{ secrets.GCP_KEY_B64 != '' }}
         run: |
-          echo "${{ secrets.GCP_SA_KEY }}" > gcp_service_account.json
-          chmod 600 gcp_service_account.json
+          echo "${{ secrets.GCP_KEY_B64 }}" | base64 -d > gcp_service_account.json
+          python -m json.tool gcp_service_account.json > /dev/null
 
-      - name: Run main.py
-        env:
-          GEMINI_API_KEY:  ${{ secrets.GEMINI_API_KEY }}
-          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-          SHEET_ID:        ${{ secrets.SHEET_ID }}
-        run: python main.py
+      - name: Run daily script
+        id: run_script
+        run: |
+          python main.py
+
+      # อัปโหลดโฟลเดอร์ reports/ เป็น Artifact ให้โหลดจากหน้า Actions
+      - name: Upload reports artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-reports
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+      # (ออปชัน) อัปโหลด log/console output ด้วย – เผื่อ debug ภายหลัง
+      - name: Upload logs (optional)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-logs
+          path: |
+            **/*.log
+            **/*.txt
+          if-no-files-found: ignore
+          retention-days: 7
