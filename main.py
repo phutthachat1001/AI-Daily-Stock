@@ -61,6 +61,8 @@ def load_config(path="config.yml"):
         "indices": ["SPY","QQQ"],
         "commodities": ["USO","BNO"],
         "fx": ["UUP","FXE"],
+        # หน่วงเล็กน้อยลดโอกาสชนลิมิต/โดนบล็อก
+        "per_call_delay_sec": 0.4,
     }
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -119,26 +121,38 @@ def pct_change(series, periods=1):
 # ======================= Finnhub API =======================
 FINNHUB_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
 
+# -------- Robust HTTP wrapper: กันล้ม + อธิบายสาเหตุ --------
+def _finnhub_get(url, params, timeout=30):
+    try:
+        r = requests.get(url, params=params, timeout=timeout)
+        if r.status_code == 403:
+            sym = params.get("symbol", "-")
+            print(f"[Finnhub 403] Forbidden for symbol={sym}. "
+                  f"สาเหตุที่พบบ่อย: key ใช้ไม่ได้/สิทธิ์ไม่ครอบคลุม/หรือ IP runner ถูกบล็อก.")
+            return None
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException as e:
+        sym = params.get("symbol", "-")
+        print(f"[Finnhub error] symbol={sym} {type(e).__name__}: {e}")
+        return None
+
 def finnhub_candles(symbol: str, resolution="D", lookback_days=400):
     """
-    ดึงแท่งเทียนจาก Finnhub:
     GET /stock/candle?symbol=TSLA&resolution=D&from=...&to=...&token=...
     คืน DataFrame มีคอลัมน์: Open, High, Low, Close, Volume ; index=Datetime
+    *ถ้าพลาด/ถูกปฏิเสธ -> คืน DataFrame ว่าง (ไม่ให้โปรแกรมล้ม)
     """
     if not FINNHUB_KEY:
         raise RuntimeError("Missing FINNHUB_API_KEY")
 
     to_ts = int(time.time())
-    # บัฟเฟอร์เล็กน้อยให้เกิน lookback เผื่อวันหยุด
-    frm_ts = to_ts - int(lookback_days * 86400 * 1.4)
+    frm_ts = to_ts - int(lookback_days * 86400 * 1.4)  # เผื่อวันหยุด
 
     url = "https://finnhub.io/api/v1/stock/candle"
     params = {"symbol": symbol, "resolution": resolution, "from": frm_ts, "to": to_ts, "token": FINNHUB_KEY}
-    r = requests.get(url, params=params, timeout=30)
-    r.raise_for_status()
-    j = r.json()
-    if j.get("s") != "ok":
-        # no_data หรือ error อื่น
+    j = _finnhub_get(url, params)
+    if not j or j.get("s") != "ok":
         return pd.DataFrame()
 
     t = j.get("t", [])
@@ -149,23 +163,22 @@ def finnhub_candles(symbol: str, resolution="D", lookback_days=400):
         "Close":j.get("c", []),
         "Volume": j.get("v", []),
     }, index=pd.to_datetime(t, unit="s"))
-    df = df.sort_index()
-    return df
+    return df.sort_index()
 
 def finnhub_company_news(symbol: str, from_date: str, to_date: str, limit: int = 5):
     """
     GET /company-news?symbol=AAPL&from=YYYY-MM-DD&to=YYYY-MM-DD&token=...
     คืน list ของข่าว (headline, summary, source, url, datetime)
+    *ถ้าพลาด/ถูกปฏิเสธ -> คืน [] (ไม่ให้โปรแกรมล้ม)
     """
     if not FINNHUB_KEY:
         raise RuntimeError("Missing FINNHUB_API_KEY")
     url = "https://finnhub.io/api/v1/company-news"
     params = {"symbol": symbol, "from": from_date, "to": to_date, "token": FINNHUB_KEY}
-    r = requests.get(url, params=params, timeout=30)
-    r.raise_for_status()
-    arr = r.json() or []
-    # เรียงใหม่ล่าสุดก่อน และตัดตาม limit
-    arr = sorted(arr, key=lambda x: x.get("datetime", 0), reverse=True)[:limit]
+    j = _finnhub_get(url, params)
+    if not j:
+        return []
+    arr = sorted(j, key=lambda x: x.get("datetime", 0), reverse=True)[:limit]
     out = []
     for n in arr:
         out.append({
@@ -226,7 +239,7 @@ def build_features(ticker, df):
     return out
 
 
-# ======================= Gemini Prompt (ป้อนข้อมูลให้วิเคราะห์) =======================
+# ======================= Gemini Prompt =======================
 def build_ai_prompt(config, market_overview, features_list, news_map):
     tz = config.get("timezone", "Asia/Bangkok")
     today = datetime.now(ZoneInfo(tz)).strftime("%Y-%m-%d")
@@ -234,14 +247,12 @@ def build_ai_prompt(config, market_overview, features_list, news_map):
     dsl = risk.get("default_stop_loss_pct", 0.03)
     dtp = risk.get("default_take_profit_pct", 0.06)
 
-    # ภาพรวมตลาด -> บรรทัดเดียว
     overview_joined = "; ".join(
         f"{k}:{item['ticker']} p={fmt_price(item['price'])} 1d={fmt_pct(item['chg_1d'])} rsi={item['rsi14']:.1f} trend={item['trend_sma']}"
         for k, arr in market_overview.items() if arr
         for item in arr
     ) or "-"
 
-    # คุณลักษณะต่อหุ้น (เป็น bullet)
     feat_lines = []
     for f in features_list:
         feat_lines.append(
@@ -252,7 +263,6 @@ def build_ai_prompt(config, market_overview, features_list, news_map):
         )
     feat_block = "- " + "\n- ".join(feat_lines) if feat_lines else "-"
 
-    # ข่าวล่าสุดต่อหุ้น (หัวข้อ + ลิงก์)
     news_lines = []
     for t, items in news_map.items():
         if not items:
@@ -454,13 +464,17 @@ def render_report(date_str, overview, features, ai_json, news_map):
 
 
 # ======================= Blocks =======================
-def to_overview_block(tickers, lookback_days):
+def to_overview_block(tickers, lookback_days, delay_sec=0.0):
     arr = []
     for t in tickers:
         df = finnhub_candles(t, "D", lookback_days)
-        if df.empty: continue
-        f = build_features(t, df)
-        if f: arr.append(f)
+        if df.empty:
+            print(f"[overview] skip {t}: no data/forbidden")
+        else:
+            f = build_features(t, df)
+            if f: arr.append(f)
+        if delay_sec > 0:
+            time.sleep(delay_sec)
     return arr
 
 
@@ -478,15 +492,16 @@ def main():
     commodities = config.get("commodities")
     fx = config.get("fx")
     cfg_news = config.get("news", {"enable": True, "lookback_days": 2, "per_ticker": 3})
+    delay = float(config.get("per_call_delay_sec", 0.0))
 
-    # 1) ภาพรวมตลาด
+    # 1) ภาพรวมตลาด (กันล้ม + เว้นจังหวะเรียก)
     overview = {
-        "indices": to_overview_block(indices, lookback),
-        "commodities": to_overview_block(commodities, lookback),
-        "fx": to_overview_block(fx, lookback),
+        "indices": to_overview_block(indices, lookback, delay_sec=delay),
+        "commodities": to_overview_block(commodities, lookback, delay_sec=delay),
+        "fx": to_overview_block(fx, lookback, delay_sec=delay),
     }
 
-    # 2) คุณลักษณะ/ตัวชี้วัดของหุ้น 10 ตัว
+    # 2) คุณลักษณะ/ตัวชี้วัดของหุ้น
     features = []
     hist_cache = {}
     for t in tickers:
@@ -494,18 +509,20 @@ def main():
         hist_cache[t] = df
         f = build_features(t, df) if not df.empty else None
         if f: features.append(f)
+        if delay > 0:
+            time.sleep(delay)
 
     if not features:
         # เขียนรายงานสั้น ๆ เพื่อไม่ให้ workflow ล้ม
         ensure_dir("reports")
         report_date = now.strftime("%Y-%m-%d")
         msg = ("# Daily AI Stock Insight — {d}\n\n"
-               "ไม่สามารถโหลดข้อมูลจาก Finnhub ได้ในรอบนี้ (อาจเกิน rate limit/เน็ตขัดข้อง).").format(d=report_date)
+               "ไม่สามารถโหลดข้อมูลจาก Finnhub ได้ในรอบนี้ (อาจเกินสิทธิ์/ถูกบล็อก/เน็ตขัดข้อง).").format(d=report_date)
         open(f"reports/{report_date}.md","w",encoding="utf-8").write(msg)
         open("reports/latest.md","w",encoding="utf-8").write(msg)
         print("Report generated (empty)."); return
 
-    # 3) ข่าวจาก Finnhub
+    # 3) ข่าวจาก Finnhub (กันล้มต่อสัญลักษณ์)
     news_map = {}
     if cfg_news.get("enable", True):
         from_date = (now - timedelta(days=int(cfg_news.get("lookback_days",2))+1)).strftime("%Y-%m-%d")
@@ -515,6 +532,8 @@ def main():
             t = f["ticker"]
             items = finnhub_company_news(t, from_date, to_date, limit=per_ticker)
             news_map[t] = items
+            if delay > 0:
+                time.sleep(delay)
 
     # 4) สร้าง prompt และเรียก Gemini
     sys, usr = build_ai_prompt(config, overview, features, news_map)
