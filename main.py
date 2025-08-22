@@ -1,17 +1,16 @@
 # main.py
 # -*- coding: utf-8 -*-
 """
-AI Daily Stock Insight with News Impact (Finnhub only)
-- ดึงราคาหุ้น/ETF แบบ daily จาก Finnhub
-- ดึงข่าวบริษัทจาก Finnhub
+AI Daily Stock Insight (Yahoo Finance + Google News RSS)
+- ดึงแท่งเทียน/ราคาแบบ daily จาก Yahoo Finance (ไม่ต้องใช้ API key)
+- ดึงข่าวบริษัทจาก Google News RSS (ไม่ต้องใช้ API key)
 - คำนวณ SMA/RSI/MACD/52w/เปอร์เซ็นต์การเปลี่ยนแปลง
-- เรียก Gemini วิเคราะห์: Buy/Sell/Hold + Entry/SL/TP + ปัจจัยบวก/ลบ (หลายข้อ)
+- เรียก Gemini วิเคราะห์: Buy/Sell/Hold + Entry/SL/TP + ปัจจัยบวก/ลบ
 - ออกรายงาน Markdown (reports/)
 - (ออปชัน) วาดกราฟ .png ต่อหุ้น (reports/)
 - (ออปชัน) ส่งข้อมูลเข้า Google Sheet (Service Account)
 
-Env:
-- FINNHUB_API_KEY : คีย์ Finnhub
+Env ที่ต้องมี:
 - GEMINI_API_KEY  : คีย์ Gemini
 - SHEET_ID        : (ออปชัน) Spreadsheet ID ถ้าต้องการเขียน Google Sheets
 """
@@ -22,13 +21,13 @@ import json
 import math
 import time
 import yaml
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+from urllib.parse import quote_plus
 
-import requests
 import numpy as np
 import pandas as pd
-import google.generativeai as genai
+import requests  # ใช้สำหรับ check internet / เผื่อในอนาคต
 
 # ---- Matplotlib สำหรับวาดกราฟบน GitHub Actions (headless) ----
 try:
@@ -46,13 +45,19 @@ except Exception:
     gspread = None
     ServiceAccountCredentials = None
 
+# ---- Gemini ----
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
+
 
 # ======================= Config / Utils =======================
 def load_config(path="config.yml"):
     default = {
         "timezone": "Asia/Bangkok",
-        "skip_if_weekend": True,
-        "lookback_days": 260,
+        "skip_if_weekend": True,          # ข้ามวันเสาร์-อาทิตย์
+        "lookback_days": 260,             # ประวัติแท่งเทียน ~1 ปีทำการ
         "gemini_model": "gemini-2.5-flash",
         "news": {"enable": True, "lookback_days": 2, "per_ticker": 3},
         "risk_management": {"default_stop_loss_pct": 0.03, "default_take_profit_pct": 0.06},
@@ -61,8 +66,8 @@ def load_config(path="config.yml"):
         "indices": ["SPY","QQQ"],
         "commodities": ["USO","BNO"],
         "fx": ["UUP","FXE"],
-        # หน่วงเล็กน้อยลดโอกาสชนลิมิต/โดนบล็อก
-        "per_call_delay_sec": 0.4,
+        "per_call_delay_sec": 0.2,        # หน่วงเล็กน้อย (กันโดน throttle จาก yfinance)
+        "google_news_locale": {"hl": "en-US", "gl": "US", "ceid": "US:en"}  # ปรับ locale ข่าวได้
     }
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -118,76 +123,77 @@ def pct_change(series, periods=1):
     return series.pct_change(periods=periods)
 
 
-# ======================= Finnhub API =======================
-FINNHUB_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
-
-# -------- Robust HTTP wrapper: กันล้ม + อธิบายสาเหตุ --------
-def _finnhub_get(url, params, timeout=30):
+# ======================= Yahoo Finance =======================
+def yahoo_candles(symbol: str, lookback_days=400):
+    """
+    ดึงแท่งเทียนจาก Yahoo Finance ผ่าน yfinance
+    คืน DataFrame: Open, High, Low, Close, Volume ; index=datetime
+    """
     try:
-        r = requests.get(url, params=params, timeout=timeout)
-        if r.status_code == 403:
-            sym = params.get("symbol", "-")
-            print(f"[Finnhub 403] Forbidden for symbol={sym}. "
-                  f"สาเหตุที่พบบ่อย: key ใช้ไม่ได้/สิทธิ์ไม่ครอบคลุม/หรือ IP runner ถูกบล็อก.")
-            return None
-        r.raise_for_status()
-        return r.json()
-    except requests.RequestException as e:
-        sym = params.get("symbol", "-")
-        print(f"[Finnhub error] symbol={sym} {type(e).__name__}: {e}")
-        return None
-
-def finnhub_candles(symbol: str, resolution="D", lookback_days=400):
-    """
-    GET /stock/candle?symbol=TSLA&resolution=D&from=...&to=...&token=...
-    คืน DataFrame มีคอลัมน์: Open, High, Low, Close, Volume ; index=Datetime
-    *ถ้าพลาด/ถูกปฏิเสธ -> คืน DataFrame ว่าง (ไม่ให้โปรแกรมล้ม)
-    """
-    if not FINNHUB_KEY:
-        raise RuntimeError("Missing FINNHUB_API_KEY")
-
-    to_ts = int(time.time())
-    frm_ts = to_ts - int(lookback_days * 86400 * 1.4)  # เผื่อวันหยุด
-
-    url = "https://finnhub.io/api/v1/stock/candle"
-    params = {"symbol": symbol, "resolution": resolution, "from": frm_ts, "to": to_ts, "token": FINNHUB_KEY}
-    j = _finnhub_get(url, params)
-    if not j or j.get("s") != "ok":
+        import yfinance as yf
+    except Exception as e:
+        print("[Yahoo] yfinance not installed:", e)
         return pd.DataFrame()
 
-    t = j.get("t", [])
-    df = pd.DataFrame({
-        "Open": j.get("o", []),
-        "High": j.get("h", []),
-        "Low":  j.get("l", []),
-        "Close":j.get("c", []),
-        "Volume": j.get("v", []),
-    }, index=pd.to_datetime(t, unit="s"))
-    return df.sort_index()
-
-def finnhub_company_news(symbol: str, from_date: str, to_date: str, limit: int = 5):
-    """
-    GET /company-news?symbol=AAPL&from=YYYY-MM-DD&to=YYYY-MM-DD&token=...
-    คืน list ของข่าว (headline, summary, source, url, datetime)
-    *ถ้าพลาด/ถูกปฏิเสธ -> คืน [] (ไม่ให้โปรแกรมล้ม)
-    """
-    if not FINNHUB_KEY:
-        raise RuntimeError("Missing FINNHUB_API_KEY")
-    url = "https://finnhub.io/api/v1/company-news"
-    params = {"symbol": symbol, "from": from_date, "to": to_date, "token": FINNHUB_KEY}
-    j = _finnhub_get(url, params)
-    if not j:
-        return []
-    arr = sorted(j, key=lambda x: x.get("datetime", 0), reverse=True)[:limit]
-    out = []
-    for n in arr:
-        out.append({
-            "title": n.get("headline", ""),
-            "link": n.get("url", ""),
-            "published": epoch_to_iso(n.get("datetime", 0)),
-            "source": n.get("source", "")
+    try:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=int(lookback_days * 1.4))  # เผื่อวันหยุด
+        df = yf.download(
+            symbol,
+            start=start.date().isoformat(),
+            end=end.date().isoformat(),
+            interval="1d",
+            progress=False,
+            auto_adjust=False,   # ใช้ราคาเดิม (ไม่ปรับ split/div)
+            threads=True,
+        )
+        if df is None or df.empty:
+            print(f"[Yahoo] no data for {symbol}")
+            return pd.DataFrame()
+        # ทำให้คอลัมน์สอดคล้องกัน
+        df = df.rename(columns={
+            "Open": "Open", "High": "High", "Low": "Low", "Close": "Close", "Volume": "Volume"
         })
-    return out
+        df.index = pd.to_datetime(df.index)
+        df = df[["Open","High","Low","Close","Volume"]].dropna(how="any")
+        return df.sort_index()
+    except Exception as e:
+        print(f"[Yahoo] error {symbol}: {e}")
+        return pd.DataFrame()
+
+
+# ======================= Google News RSS =======================
+def google_news_company(query_text: str, lookback_days=2, limit=3, locale=None):
+    """
+    ดึงข่าวด้วย Google News RSS โดยใช้คำค้นของบริษัท/ติ๊กเกอร์
+    ไม่มีคีย์, ใช้ได้บน GitHub Actions
+    """
+    try:
+        import feedparser
+    except Exception as e:
+        print("[News] feedparser not installed:", e)
+        return []
+
+    if not query_text:
+        return []
+
+    locale = locale or {"hl": "en-US", "gl": "US", "ceid": "US:en"}
+    q = quote_plus(f'{query_text} when:{lookback_days}d')
+    url = f"https://news.google.com/rss/search?q={q}&hl={locale['hl']}&gl={locale['gl']}&ceid={locale['ceid']}"
+
+    try:
+        feed = feedparser.parse(url)
+        items = []
+        for e in feed.entries[:limit]:
+            title = getattr(e, "title", "").strip()
+            link  = getattr(e, "link", "").strip()
+            pub   = getattr(e, "published", "")
+            src   = getattr(getattr(e, "source", {}), "title", "") or "Google News"
+            items.append({"title": title, "link": link, "published": pub, "source": src})
+        return items
+    except Exception as e:
+        print(f"[News] error for query={query_text}: {e}")
+        return []
 
 
 # ======================= Company Names (ข่าว) =======================
@@ -195,6 +201,9 @@ COMPANY_NAME = {
     "TSLA": "Tesla", "NVDA": "Nvidia", "AAPL": "Apple", "MSFT": "Microsoft", "AMZN": "Amazon",
     "ALAB": "Astera Labs", "PLTR": "Palantir", "TSM": "Taiwan Semiconductor",
     "AMD": "Advanced Micro Devices", "RKLB": "Rocket Lab",
+    "SPY": "S&P 500 ETF", "QQQ": "Nasdaq-100 ETF",
+    "USO": "United States Oil Fund", "BNO": "United States Brent Oil Fund",
+    "UUP": "Invesco US Dollar Index", "FXE": "Invesco Euro Currency Trust",
 }
 
 
@@ -247,12 +256,14 @@ def build_ai_prompt(config, market_overview, features_list, news_map):
     dsl = risk.get("default_stop_loss_pct", 0.03)
     dtp = risk.get("default_take_profit_pct", 0.06)
 
+    # ภาพรวมตลาด -> บรรทัดเดียว
     overview_joined = "; ".join(
         f"{k}:{item['ticker']} p={fmt_price(item['price'])} 1d={fmt_pct(item['chg_1d'])} rsi={item['rsi14']:.1f} trend={item['trend_sma']}"
         for k, arr in market_overview.items() if arr
         for item in arr
     ) or "-"
 
+    # คุณลักษณะต่อหุ้น (เป็น bullet)
     feat_lines = []
     for f in features_list:
         feat_lines.append(
@@ -263,6 +274,7 @@ def build_ai_prompt(config, market_overview, features_list, news_map):
         )
     feat_block = "- " + "\n- ".join(feat_lines) if feat_lines else "-"
 
+    # ข่าวล่าสุดต่อหุ้น (หัวข้อ + ลิงก์)
     news_lines = []
     for t, items in news_map.items():
         if not items:
@@ -321,6 +333,8 @@ def call_gemini(model_name, system_prompt, user_prompt):
     key = os.getenv("GEMINI_API_KEY", "").strip()
     if not key:
         raise RuntimeError("Missing GEMINI_API_KEY")
+    if genai is None:
+        raise RuntimeError("google-generativeai not installed")
     genai.configure(api_key=key)
     model = genai.GenerativeModel(model_name)
     resp = model.generate_content([{"role":"user","parts":[system_prompt + "\n\n" + user_prompt]}])
@@ -355,7 +369,7 @@ def plot_stock(ticker, df, out_path):
         pass
 
 
-# ======================= Google Sheet =======================
+# ======================= Google Sheet (ออปชัน) =======================
 def connect_google_sheet(json_keyfile: str, spreadsheet_id: str):
     if gspread is None or ServiceAccountCredentials is None:
         raise RuntimeError("gspread/oauth2client not installed")
@@ -394,7 +408,7 @@ def render_report(date_str, overview, features, ai_json, news_map):
 
     md = []
     md.append(f"# Daily AI Stock Insight — {date_str}\n")
-    md.append("> *รายงานอัตโนมัติจาก GitHub Actions + Gemini — เพื่อการศึกษา ไม่ใช่คำแนะนำการลงทุน*\n")
+    md.append("> *รายงานอัตโนมัติจาก GitHub Actions + Yahoo Finance + Google News + Gemini — เพื่อการศึกษา ไม่ใช่คำแนะนำการลงทุน*\n")
 
     md.append("## ภาพรวมตลาด\n")
     def render_group(name, arr):
@@ -467,9 +481,9 @@ def render_report(date_str, overview, features, ai_json, news_map):
 def to_overview_block(tickers, lookback_days, delay_sec=0.0):
     arr = []
     for t in tickers:
-        df = finnhub_candles(t, "D", lookback_days)
+        df = yahoo_candles(t, lookback_days)
         if df.empty:
-            print(f"[overview] skip {t}: no data/forbidden")
+            print(f"[overview] skip {t}: no data")
         else:
             f = build_features(t, df)
             if f: arr.append(f)
@@ -493,19 +507,20 @@ def main():
     fx = config.get("fx")
     cfg_news = config.get("news", {"enable": True, "lookback_days": 2, "per_ticker": 3})
     delay = float(config.get("per_call_delay_sec", 0.0))
+    locale_news = config.get("google_news_locale", {"hl":"en-US","gl":"US","ceid":"US:en"})
 
-    # 1) ภาพรวมตลาด (กันล้ม + เว้นจังหวะเรียก)
+    # 1) ภาพรวมตลาด
     overview = {
         "indices": to_overview_block(indices, lookback, delay_sec=delay),
         "commodities": to_overview_block(commodities, lookback, delay_sec=delay),
         "fx": to_overview_block(fx, lookback, delay_sec=delay),
     }
 
-    # 2) คุณลักษณะ/ตัวชี้วัดของหุ้น
+    # 2) คุณลักษณะ/ตัวชี้วัดของหุ้นหลัก
     features = []
     hist_cache = {}
     for t in tickers:
-        df = finnhub_candles(t, "D", lookback)
+        df = yahoo_candles(t, lookback)
         hist_cache[t] = df
         f = build_features(t, df) if not df.empty else None
         if f: features.append(f)
@@ -517,20 +532,20 @@ def main():
         ensure_dir("reports")
         report_date = now.strftime("%Y-%m-%d")
         msg = ("# Daily AI Stock Insight — {d}\n\n"
-               "ไม่สามารถโหลดข้อมูลจาก Finnhub ได้ในรอบนี้ (อาจเกินสิทธิ์/ถูกบล็อก/เน็ตขัดข้อง).").format(d=report_date)
+               "ไม่สามารถโหลดข้อมูลจาก Yahoo Finance ได้ในรอบนี้ (เน็ตขัดข้อง/สัญลักษณ์ผิดพลาด).").format(d=report_date)
         open(f"reports/{report_date}.md","w",encoding="utf-8").write(msg)
         open("reports/latest.md","w",encoding="utf-8").write(msg)
         print("Report generated (empty)."); return
 
-    # 3) ข่าวจาก Finnhub (กันล้มต่อสัญลักษณ์)
+    # 3) ข่าวจาก Google News RSS
     news_map = {}
     if cfg_news.get("enable", True):
-        from_date = (now - timedelta(days=int(cfg_news.get("lookback_days",2))+1)).strftime("%Y-%m-%d")
-        to_date   = now.strftime("%Y-%m-%d")
         per_ticker = int(cfg_news.get("per_ticker", 3))
+        lb_days = int(cfg_news.get("lookback_days", 2))
         for f in features:
             t = f["ticker"]
-            items = finnhub_company_news(t, from_date, to_date, limit=per_ticker)
+            q = COMPANY_NAME.get(t, t)
+            items = google_news_company(q, lookback_days=lb_days, limit=per_ticker, locale=locale_news)
             news_map[t] = items
             if delay > 0:
                 time.sleep(delay)
