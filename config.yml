@@ -1,42 +1,22 @@
-# โซนเวลา/วันหยุด
 timezone: Asia/Bangkok
 skip_if_weekend: true
-
-# จำนวนวันย้อนหลังที่ใช้คำนวณอินดิเคเตอร์/กราฟ
 lookback_days: 260
-
-# รุ่นโมเดลของ Gemini
 gemini_model: gemini-2.5-flash
-
-# ข่าวต่อหุ้น
 news:
   enable: true
-  lookback_days: 2      # ข่าวย้อนหลังกี่วัน
-  per_ticker: 3         # จำนวนหัวข้อข่าวต่อหุ้น
-
-# กฎ risk (ค่าเริ่มต้น หากโมเดลไม่เสนอราคาเฉพาะ)
+  lookback_days: 2
+  per_ticker: 3
 risk_management:
   default_stop_loss_pct: 0.03
   default_take_profit_pct: 0.06
-
-# สร้างกราฟ .png ต่อหุ้นใน reports/
 charts:
   enable: true
-
-# รายชื่อหุ้นเป้าหมาย
-tickers:
-  - TSLA
-  - NVDA
-  - AAPL
-  - MSFT
-  - AMZN
-  - ALAB
-  - PLTR
-  - TSM
-  - AMD
-  - RKLB
-
-# ภาพรวมตลาด: ใช้ ETF เพื่อความเสถียร (ไม่พึ่งสัญลักษณ์ดัชนีล้วน)
-indices:     ["SPY","QQQ"]
+tickers: ["TSLA","NVDA","AAPL","MSFT","AMZN","ALAB","PLTR","TSM","AMD","RKLB"]
+indices: ["SPY","QQQ"]
 commodities: ["USO","BNO"]
-fx:          ["UUP","FXE"]
+fx: ["UUP","FXE"]
+per_call_delay_sec: 0.2
+google_news_locale:
+  hl: "en-US"
+  gl: "US"
+  ceid: "US:en"
