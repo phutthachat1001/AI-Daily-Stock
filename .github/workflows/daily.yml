@@ -1,14 +1,10 @@
 name: Daily AI Stock Insight
 
 on:
-  # เรียกเองได้จากหน้า Actions
   workflow_dispatch: {}
-
-  # รันอัตโนมัติทุกวัน ~06:10 Asia/Bangkok (UTC+7 == 23:10 UTC ของวันก่อนหน้า)
   schedule:
+    # รันทุกวัน ~06:10 Asia/Bangkok (23:10 UTC ของวันก่อนหน้า)
     - cron: '10 23 * * *'
-
-  # (ออปชัน) รันเมื่อแก้ไฟล์หลัก ๆ
   push:
     branches: [ main, master ]
     paths:
@@ -26,14 +22,11 @@ jobs:
       cancel-in-progress: false
 
     env:
-      # Secrets ที่ต้องมีอย่างน้อย GEMINI_API_KEY
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      # ถ้าอยากเขียน Google Sheet ให้ใส่ SHEET_ID ใน repo secrets ด้วย (ปล่อยว่างได้)
       SHEET_ID: ${{ secrets.SHEET_ID }}
 
     steps:
       - name: Checkout repository
-      # ดึงซอร์สโค้ดจาก repo
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -48,19 +41,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ถ้ามี GCP_KEY_B64 ใน Secrets จะถอดเป็นไฟล์ gcp_service_account.json ให้อัตโนมัติ
+      # ถอดกุญแจ GCP จาก secret (ถ้ามี) โดยเช็คใน shell แทน ไม่ใช้ if: ใน YAML
       - name: Decode GCP service account key (optional)
-        if: ${{ secrets.GCP_KEY_B64 != '' }}
+        env:
+          GCP_KEY_B64: ${{ secrets.GCP_KEY_B64 }}
         run: |
-          echo "${{ secrets.GCP_KEY_B64 }}" | base64 -d > gcp_service_account.json
-          python -m json.tool gcp_service_account.json > /dev/null
+          if [ -n "$GCP_KEY_B64" ]; then
+            echo "$GCP_KEY_B64" | base64 -d > gcp_service_account.json
+            # ตรวจว่า JSON ถูกต้อง
+            python -m json.tool gcp_service_account.json > /dev/null
+            echo "gcp_service_account.json ready."
+          else
+            echo "GCP_KEY_B64 not set — skipping Google Sheets."
+          fi
 
       - name: Run daily script
-        id: run_script
-        run: |
-          python main.py
+        run: python main.py
 
-      # อัปโหลดโฟลเดอร์ reports/ เป็น Artifact ให้โหลดจากหน้า Actions
       - name: Upload reports artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -70,7 +67,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # (ออปชัน) อัปโหลด log/console output ด้วย – เผื่อ debug ภายหลัง
+      # (ออปชัน) อัปโหลด log ไว้ debug เมื่อรันล้มเหลว
       - name: Upload logs (optional)
         if: failure()
         uses: actions/upload-artifact@v4
