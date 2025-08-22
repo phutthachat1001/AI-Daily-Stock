@@ -27,9 +27,9 @@ from urllib.parse import quote_plus
 
 import numpy as np
 import pandas as pd
-import requests  # ใช้สำหรับ check internet / เผื่อในอนาคต
+import requests  # เผื่อเช็คเน็ต/ใช้ภายหลัง
 
-# ---- Matplotlib สำหรับวาดกราฟบน GitHub Actions (headless) ----
+# ---- Matplotlib (headless สำหรับ GitHub Actions) ----
 try:
     import matplotlib
     matplotlib.use("Agg")
@@ -56,8 +56,8 @@ except Exception:
 def load_config(path="config.yml"):
     default = {
         "timezone": "Asia/Bangkok",
-        "skip_if_weekend": True,          # ข้ามวันเสาร์-อาทิตย์
-        "lookback_days": 260,             # ประวัติแท่งเทียน ~1 ปีทำการ
+        "skip_if_weekend": True,
+        "lookback_days": 260,
         "gemini_model": "gemini-2.5-flash",
         "news": {"enable": True, "lookback_days": 2, "per_ticker": 3},
         "risk_management": {"default_stop_loss_pct": 0.03, "default_take_profit_pct": 0.06},
@@ -66,8 +66,8 @@ def load_config(path="config.yml"):
         "indices": ["SPY","QQQ"],
         "commodities": ["USO","BNO"],
         "fx": ["UUP","FXE"],
-        "per_call_delay_sec": 0.2,        # หน่วงเล็กน้อย (กันโดน throttle จาก yfinance)
-        "google_news_locale": {"hl": "en-US", "gl": "US", "ceid": "US:en"}  # ปรับ locale ข่าวได้
+        "per_call_delay_sec": 0.2,
+        "google_news_locale": {"hl": "en-US", "gl": "US", "ceid": "US:en"}
     }
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -96,6 +96,25 @@ def epoch_to_iso(ts):
         return datetime.utcfromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return ""
+
+def to_scalar(x):
+    """
+    ดึงค่า scalar อย่างปลอดภัย: รองรับ numpy scalar / pandas Series 1 element / python float
+    ตัด FutureWarning: 'Calling float on a single element Series'
+    """
+    try:
+        # pandas / numpy scalar มักจะมี .item()
+        return x.item()
+    except AttributeError:
+        try:
+            return float(x)
+        except Exception:
+            return np.nan
+    except Exception:
+        try:
+            return float(x)
+        except Exception:
+            return np.nan
 
 
 # ======================= Technical Indicators =======================
@@ -144,13 +163,13 @@ def yahoo_candles(symbol: str, lookback_days=400):
             end=end.date().isoformat(),
             interval="1d",
             progress=False,
-            auto_adjust=False,   # ใช้ราคาเดิม (ไม่ปรับ split/div)
+            auto_adjust=False,
             threads=True,
         )
         if df is None or df.empty:
             print(f"[Yahoo] no data for {symbol}")
             return pd.DataFrame()
-        # ทำให้คอลัมน์สอดคล้องกัน
+        # normalize columns
         df = df.rename(columns={
             "Open": "Open", "High": "High", "Low": "Low", "Close": "Close", "Volume": "Volume"
         })
@@ -164,10 +183,7 @@ def yahoo_candles(symbol: str, lookback_days=400):
 
 # ======================= Google News RSS =======================
 def google_news_company(query_text: str, lookback_days=2, limit=3, locale=None):
-    """
-    ดึงข่าวด้วย Google News RSS โดยใช้คำค้นของบริษัท/ติ๊กเกอร์
-    ไม่มีคีย์, ใช้ได้บน GitHub Actions
-    """
+    """ดึงข่าวด้วย Google News RSS โดยใช้คำค้น (บริษัท/ติ๊กเกอร์)"""
     try:
         import feedparser
     except Exception as e:
@@ -215,27 +231,31 @@ def build_features(ticker, df):
     close = df["Close"]
     out = {"ticker": ticker}
     out["last_date"] = df.index[-1].strftime("%Y-%m-%d")
-    out["price"] = float(close.iloc[-1])
+    out["price"] = to_scalar(close.iloc[-1])
 
-    out["sma20"] = float(sma(close, 20).iloc[-1])
-    out["sma50"] = float(sma(close, 50).iloc[-1])
-    out["sma200"] = float(sma(close, 200).iloc[-1]) if len(df) >= 200 else np.nan
+    s20 = sma(close, 20)
+    s50 = sma(close, 50)
+    s200 = sma(close, 200) if len(df) >= 200 else pd.Series(dtype=float)
+
+    out["sma20"] = to_scalar(s20.iloc[-1])
+    out["sma50"] = to_scalar(s50.iloc[-1])
+    out["sma200"] = to_scalar(s200.iloc[-1]) if len(df) >= 200 else np.nan
 
     rsi_series = rsi(close, 14)
-    out["rsi14"] = float(rsi_series.iloc[-1])
+    out["rsi14"] = to_scalar(rsi_series.iloc[-1])
 
     macd_line, signal_line, hist = macd(close, 12, 26, 9)
-    out["macd"] = float(macd_line.iloc[-1])
-    out["macd_signal"] = float(signal_line.iloc[-1])
-    out["macd_hist"] = float(hist.iloc[-1])
+    out["macd"] = to_scalar(macd_line.iloc[-1])
+    out["macd_signal"] = to_scalar(signal_line.iloc[-1])
+    out["macd_hist"] = to_scalar(hist.iloc[-1])
 
-    out["chg_1d"] = float(pct_change(close, 1).iloc[-1])
-    out["chg_5d"] = float(pct_change(close, 5).iloc[-1])
-    out["chg_20d"] = float(pct_change(close, 20).iloc[-1])
+    out["chg_1d"] = to_scalar(pct_change(close, 1).iloc[-1])
+    out["chg_5d"] = to_scalar(pct_change(close, 5).iloc[-1])
+    out["chg_20d"] = to_scalar(pct_change(close, 20).iloc[-1])
 
     lookback_252 = close.tail(252) if len(close) >= 252 else close
-    out["high_52w"] = float(lookback_252.max())
-    out["low_52w"] = float(lookback_252.min())
+    out["high_52w"] = to_scalar(lookback_252.max())
+    out["low_52w"] = to_scalar(lookback_252.min())
     out["off_high_52w_pct"] = float((out["price"]/out["high_52w"]) - 1.0) if out["high_52w"] else np.nan
     out["above_low_52w_pct"] = float((out["price"]/out["low_52w"]) - 1.0) if out["low_52w"] else np.nan
 
@@ -256,14 +276,12 @@ def build_ai_prompt(config, market_overview, features_list, news_map):
     dsl = risk.get("default_stop_loss_pct", 0.03)
     dtp = risk.get("default_take_profit_pct", 0.06)
 
-    # ภาพรวมตลาด -> บรรทัดเดียว
     overview_joined = "; ".join(
         f"{k}:{item['ticker']} p={fmt_price(item['price'])} 1d={fmt_pct(item['chg_1d'])} rsi={item['rsi14']:.1f} trend={item['trend_sma']}"
         for k, arr in market_overview.items() if arr
         for item in arr
     ) or "-"
 
-    # คุณลักษณะต่อหุ้น (เป็น bullet)
     feat_lines = []
     for f in features_list:
         feat_lines.append(
@@ -274,7 +292,6 @@ def build_ai_prompt(config, market_overview, features_list, news_map):
         )
     feat_block = "- " + "\n- ".join(feat_lines) if feat_lines else "-"
 
-    # ข่าวล่าสุดต่อหุ้น (หัวข้อ + ลิงก์)
     news_lines = []
     for t, items in news_map.items():
         if not items:
