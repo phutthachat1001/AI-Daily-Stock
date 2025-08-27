@@ -3,7 +3,6 @@ name: Daily AI Stock Insight
 on:
   workflow_dispatch: {}
   schedule:
-    # รันทุกวัน ~06:10 Asia/Bangkok (23:10 UTC ของวันก่อนหน้า)
     - cron: '10 23 * * *'
   push:
     branches: [ main, master ]
@@ -41,7 +40,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ถอดกุญแจ GCP จาก secret (ถ้ามี) โดยเช็คใน shell แทน ไม่ใช้ if: ใน YAML
       - name: Decode GCP service account key (optional)
         env:
           GCP_KEY_B64: ${{ secrets.GCP_KEY_B64 }}
@@ -67,7 +65,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # (ออปชัน) อัปโหลด log ไว้ debug เมื่อรันล้มเหลว
       - name: Upload logs (optional)
         if: failure()
         uses: actions/upload-artifact@v4
