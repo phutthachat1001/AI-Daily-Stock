@@ -1,20 +1,3 @@
-# main.py
-# -*- coding: utf-8 -*-
-"""
-AI Daily Stock Insight (Yahoo Finance + Google News RSS)
-- ดึงแท่งเทียน/ราคาแบบ daily จาก Yahoo Finance (ไม่ต้องใช้ API key)
-- ดึงข่าวบริษัทจาก Google News RSS (ไม่ต้องใช้ API key)
-- คำนวณ SMA/RSI/MACD/52w/เปอร์เซ็นต์การเปลี่ยนแปลง
-- เรียก Gemini วิเคราะห์: Buy/Sell/Hold + Entry/SL/TP + ปัจจัยบวก/ลบ
-- ออกรายงาน Markdown (reports/)
-- (ออปชัน) วาดกราฟ .png ต่อหุ้น (reports/)
-- (ออปชัน) ส่งข้อมูลเข้า Google Sheet (Service Account)
-
-Env ที่ต้องมี:
-- GEMINI_API_KEY  : คีย์ Gemini
-- SHEET_ID        : (ออปชัน) Spreadsheet ID ถ้าต้องการเขียน Google Sheets
-"""
-
 import os
 import re
 import json
@@ -37,7 +20,6 @@ try:
 except Exception:
     plt = None
 
-# ---- Google Sheets (ออปชัน) ----
 try:
     import gspread
     from oauth2client.service_account import ServiceAccountCredentials
@@ -386,7 +368,7 @@ def plot_stock(ticker, df, out_path):
         pass
 
 
-# ======================= Google Sheet (ออปชัน) =======================
+# ======================= Google Sheet =======================
 def connect_google_sheet(json_keyfile: str, spreadsheet_id: str):
     if gspread is None or ServiceAccountCredentials is None:
         raise RuntimeError("gspread/oauth2client not installed")
