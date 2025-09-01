@@ -493,84 +493,76 @@ def to_overview_block(tickers, lookback_days, delay_sec=0.0):
 
 # ======================= Main =======================
 def main():
-    config = load_config("config.yml")
-    tz = config.get("timezone", "Asia/Bangkok")
-    now = datetime.now(ZoneInfo(tz))
-    if config.get("skip_if_weekend", True) and now.weekday() >= 5:
+    cfg = load_config("config.yml")
+    now = datetime.now(ZoneInfo(cfg.get("timezone", "Asia/Bangkok")))
+    if cfg.get("skip_if_weekend", True) and now.weekday() >= 5:
         print("Weekend — skipped."); return
 
-    lookback = int(config.get("lookback_days", 260))
-    tickers = config.get("tickers")
-    indices = config.get("indices")
-    commodities = config.get("commodities")
-    fx = config.get("fx")
-    cfg_news = config.get("news", {"enable": True, "lookback_days": 2, "per_ticker": 3})
-    delay = float(config.get("per_call_delay_sec", 0.0))
-    locale_news = config.get("google_news_locale", {"hl":"en-US","gl":"US","ceid":"US:en"})
+    lookback = int(cfg.get("lookback_days", 260))
+    delay    = float(cfg.get("per_call_delay_sec", 0.0))
+    tickers  = cfg.get("tickers", [])
+    news_cfg = cfg.get("news", {"enable": True, "lookback_days": 2, "per_ticker": 3})
+    locale   = cfg.get("google_news_locale", {"hl":"en-US","gl":"US","ceid":"US:en"})
 
     # 1) ภาพรวมตลาด
-    overview = {
-        "indices": to_overview_block(indices, lookback, delay_sec=delay),
-        "commodities": to_overview_block(commodities, lookback, delay_sec=delay),
-        "fx": to_overview_block(fx, lookback, delay_sec=delay),
-    }
+    overview = {}
+    for k in ("indices", "commodities", "fx"):
+        arr = []
+        for t in cfg.get(k, []):
+            df = yahoo_candles(t, lookback)
+            if not df.empty:
+                f = build_features(t, df)
+                if f: arr.append(f)
+            if delay > 0: time.sleep(delay)
+        overview[k] = arr
 
-    # 2) คุณลักษณะ/ตัวชี้วัดของหุ้นหลัก
-    features = []
-    hist_cache = {}
+    # 2) คุณลักษณะ/ตัวชี้วัดหุ้นหลัก
+    features, hist_cache = [], {}
     for t in tickers:
         df = yahoo_candles(t, lookback)
         hist_cache[t] = df
-        f = build_features(t, df) if not df.empty else None
-        if f: features.append(f)
-        if delay > 0:
-            time.sleep(delay)
+        if not df.empty:
+            f = build_features(t, df)
+            if f: features.append(f)
+        if delay > 0: time.sleep(delay)
 
     if not features:
-        # เขียนรายงานสั้น ๆ เพื่อไม่ให้ workflow ล้ม
         ensure_dir("reports")
-        report_date = now.strftime("%Y-%m-%d")
-        msg = ("# Daily AI Stock Insight — {d}\n\n"
-               "ไม่สามารถโหลดข้อมูลจาก Yahoo Finance ได้ในรอบนี้ (เน็ตขัดข้อง/สัญลักษณ์ผิดพลาด).").format(d=report_date)
-        open(f"reports/{report_date}.md","w",encoding="utf-8").write(msg)
+        d = now.strftime("%Y-%m-%d")
+        msg = f"# Daily AI Stock Insight — {d}\n\nไม่สามารถโหลดข้อมูลจาก Yahoo Finance ได้ในรอบนี้ (เน็ตขัดข้อง/สัญลักษณ์ผิดพลาด)."
+        open(f"reports/{d}.md","w",encoding="utf-8").write(msg)
         open("reports/latest.md","w",encoding="utf-8").write(msg)
         print("Report generated (empty)."); return
 
-    # 3) ข่าวจาก Google News RSS
+    # 3) ข่าวล่าสุดต่อหุ้น
     news_map = {}
-    if cfg_news.get("enable", True):
-        per_ticker = int(cfg_news.get("per_ticker", 3))
-        lb_days = int(cfg_news.get("lookback_days", 2))
+    if news_cfg.get("enable", True):
+        per_tk  = int(news_cfg.get("per_ticker", 3))
+        lb_days = int(news_cfg.get("lookback_days", 2))
         for f in features:
-            t = f["ticker"]
-            q = COMPANY_NAME.get(t, t)
-            items = google_news_company(q, lookback_days=lb_days, limit=per_ticker, locale=locale_news)
-            news_map[t] = items
-            if delay > 0:
-                time.sleep(delay)
+            q = COMPANY_NAME.get(f["ticker"], f["ticker"])
+            news_map[f["ticker"]] = google_news_company(q, lookback_days=lb_days, limit=per_tk, locale=locale)
+            if delay > 0: time.sleep(delay)
 
-    # 4) สร้าง prompt และเรียก Gemini
-    sys, usr = build_ai_prompt(config, overview, features, news_map)
-    model_name = config.get("gemini_model", "gemini-2.5-flash")
-    ai_json = call_gemini(model_name, sys, usr)
+    # 4) เรียก Gemini
+    sys_p, usr_p = build_ai_prompt(cfg, overview, features, news_map)
+    ai_json = call_gemini(cfg.get("gemini_model", "gemini-2.5-flash"), sys_p, usr_p)
 
-    # 5) วาดกราฟ + ออกรายงาน
+    # 5) กราฟ + รายงาน
     report_date = now.strftime("%Y-%m-%d")
     ensure_dir("reports")
-
-    if config.get("charts", {}).get("enable", True) and plt is not None:
+    if cfg.get("charts", {}).get("enable", True) and plt is not None:
         for t in tickers:
             df = hist_cache.get(t)
-            if df is None or df.empty: continue
-            out_png = f"reports/{report_date}_{t}.png"
-            plot_stock(t, df, out_png)
+            if df is not None and not df.empty:
+                plot_stock(t, df, f"reports/{report_date}_{t}.png")
 
     md = render_report(report_date, overview, features, ai_json, news_map)
-    with open(f"reports/{report_date}.md","w",encoding="utf-8") as f: f.write(md)
-    with open("reports/latest.md","w",encoding="utf-8") as f: f.write(md)
+    open(f"reports/{report_date}.md","w",encoding="utf-8").write(md)
+    open("reports/latest.md","w",encoding="utf-8").write(md)
     print("Report generated:", report_date)
 
-    # 6) ส่งข้อมูลเข้า Google Sheet (ออปชัน)
+    # 6) ส่ง Google Sheet (ถ้าตั้งค่าไว้)
     sheet_id = os.getenv("SHEET_ID", "").strip()
     if sheet_id and os.path.exists("gcp_service_account.json"):
         try:
