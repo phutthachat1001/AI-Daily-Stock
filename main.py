@@ -10,9 +10,8 @@ from urllib.parse import quote_plus
 
 import numpy as np
 import pandas as pd
-import requests  # เผื่อเช็คเน็ต/ใช้ภายหลัง
+import requests
 
-# ---- Matplotlib (headless สำหรับ GitHub Actions) ----
 try:
     import matplotlib
     matplotlib.use("Agg")
@@ -27,14 +26,12 @@ except Exception:
     gspread = None
     ServiceAccountCredentials = None
 
-# ---- Gemini ----
 try:
     import google.generativeai as genai
 except Exception:
     genai = None
 
 
-# ======================= Config / Utils =======================
 def load_config(path="config.yml"):
     default = {
         "timezone": "Asia/Bangkok",
@@ -80,12 +77,7 @@ def epoch_to_iso(ts):
         return ""
 
 def to_scalar(x):
-    """
-    ดึงค่า scalar อย่างปลอดภัย: รองรับ numpy scalar / pandas Series 1 element / python float
-    ตัด FutureWarning: 'Calling float on a single element Series'
-    """
     try:
-        # pandas / numpy scalar มักจะมี .item()
         return x.item()
     except AttributeError:
         try:
@@ -99,7 +91,6 @@ def to_scalar(x):
             return np.nan
 
 
-# ======================= Technical Indicators =======================
 def sma(series, window=20):
     return series.rolling(window).mean()
 
@@ -124,12 +115,7 @@ def pct_change(series, periods=1):
     return series.pct_change(periods=periods)
 
 
-# ======================= Yahoo Finance =======================
 def yahoo_candles(symbol: str, lookback_days=400):
-    """
-    ดึงแท่งเทียนจาก Yahoo Finance ผ่าน yfinance
-    คืน DataFrame: Open, High, Low, Close, Volume ; index=datetime
-    """
     try:
         import yfinance as yf
     except Exception as e:
@@ -138,7 +124,7 @@ def yahoo_candles(symbol: str, lookback_days=400):
 
     try:
         end = datetime.now(timezone.utc)
-        start = end - timedelta(days=int(lookback_days * 1.4))  # เผื่อวันหยุด
+        start = end - timedelta(days=int(lookback_days * 1.4))
         df = yf.download(
             symbol,
             start=start.date().isoformat(),
@@ -151,7 +137,6 @@ def yahoo_candles(symbol: str, lookback_days=400):
         if df is None or df.empty:
             print(f"[Yahoo] no data for {symbol}")
             return pd.DataFrame()
-        # normalize columns
         df = df.rename(columns={
             "Open": "Open", "High": "High", "Low": "Low", "Close": "Close", "Volume": "Volume"
         })
@@ -163,9 +148,7 @@ def yahoo_candles(symbol: str, lookback_days=400):
         return pd.DataFrame()
 
 
-# ======================= Google News RSS =======================
 def google_news_company(query_text: str, lookback_days=2, limit=3, locale=None):
-    """ดึงข่าวด้วย Google News RSS โดยใช้คำค้น (บริษัท/ติ๊กเกอร์)"""
     try:
         import feedparser
     except Exception as e:
@@ -194,7 +177,6 @@ def google_news_company(query_text: str, lookback_days=2, limit=3, locale=None):
         return []
 
 
-# ======================= Company Names (ข่าว) =======================
 COMPANY_NAME = {
     "TSLA": "Tesla", "NVDA": "Nvidia", "AAPL": "Apple", "MSFT": "Microsoft", "AMZN": "Amazon",
     "ALAB": "Astera Labs", "PLTR": "Palantir", "TSM": "Taiwan Semiconductor",
@@ -204,8 +186,6 @@ COMPANY_NAME = {
     "UUP": "Invesco US Dollar Index", "FXE": "Invesco Euro Currency Trust",
 }
 
-
-# ======================= Feature Engineering =======================
 def build_features(ticker, df):
     if df.empty or len(df) < 50:
         return None
@@ -250,7 +230,6 @@ def build_features(ticker, df):
     return out
 
 
-# ======================= Gemini Prompt =======================
 def build_ai_prompt(config, market_overview, features_list, news_map):
     tz = config.get("timezone", "Asia/Bangkok")
     today = datetime.now(ZoneInfo(tz)).strftime("%Y-%m-%d")
@@ -347,7 +326,6 @@ def call_gemini(model_name, system_prompt, user_prompt):
         raise
 
 
-# ======================= Charts =======================
 def plot_stock(ticker, df, out_path):
     if plt is None or df.empty:
         return
@@ -366,9 +344,6 @@ def plot_stock(ticker, df, out_path):
         plt.close(fig)
     except Exception:
         pass
-
-
-# ======================= Google Sheet =======================
 def connect_google_sheet(json_keyfile: str, spreadsheet_id: str):
     if gspread is None or ServiceAccountCredentials is None:
         raise RuntimeError("gspread/oauth2client not installed")
@@ -400,15 +375,11 @@ def export_to_sheet(ws, date_str, features, ai_json):
         ])
     ws.append_rows(rows, value_input_option="RAW")
 
-
-# ======================= Report =======================
 def render_report(date_str, overview, features, ai_json, news_map):
     rec_map = {t["ticker"]: t for t in ai_json.get("tickers", [])}
-
     md = []
     md.append(f"# Daily AI Stock Insight — {date_str}\n")
     md.append("> *รายงานอัตโนมัติจาก GitHub Actions + Yahoo Finance + Google News + Gemini — เพื่อการศึกษา ไม่ใช่คำแนะนำการลงทุน*\n")
-
     md.append("## ภาพรวมตลาด\n")
     def render_group(name, arr):
         if not arr: return
@@ -419,7 +390,6 @@ def render_report(date_str, overview, features, ai_json, news_map):
     render_group("สินค้าโภคภัณฑ์ (ETF)", overview.get("commodities"))
     render_group("FX (ETF)", overview.get("fx"))
     md.append("")
-
     md.append("## สรุปสัญญาณต่อหุ้น\n")
     md.append("| Ticker | Price | 1d | Trend | RSI14 | Stance | Confidence |")
     md.append("|---|---:|---:|---|---:|---|---:|")
@@ -427,7 +397,6 @@ def render_report(date_str, overview, features, ai_json, news_map):
         r = rec_map.get(f["ticker"], {})
         md.append(f"| `{f['ticker']}` | {fmt_price(f['price'])} | {fmt_pct(f['chg_1d'])} | {f['trend_sma']} | {f['rsi14']:.1f} | {r.get('stance','-')} | {r.get('confidence','-')} |")
     md.append("")
-
     md.append("## แผนการเข้า-ออกต่อหุ้น (รายละเอียด)\n")
     for f in features:
         r = rec_map.get(f["ticker"], {})
@@ -439,12 +408,10 @@ def render_report(date_str, overview, features, ai_json, news_map):
         md.append(f"- **ข้อแนะนำ (Gemini):** {r.get('stance','-')} | ความเชื่อมั่น: {r.get('confidence','-')}")
         md.append(f"  - Entry: {r.get('entry_rule','-')} | ช่วงราคาเข้า: {r.get('entry_price_range','-')}")
         md.append(f"  - Stop Loss: {r.get('stop_loss','-')} | Take Profit: {r.get('take_profit','-')} | Timeframe: {r.get('timeframe','-')}")
-
         bullets = r.get("reasoning_bullets", [])
         if bullets:
             md.append("  - เหตุผล (เทคนิค):")
             for b in bullets: md.append(f"    - {b}")
-
         pos = r.get("positive_factors", [])
         neg = r.get("negative_factors", [])
         if pos and pos != "-":
@@ -453,7 +420,6 @@ def render_report(date_str, overview, features, ai_json, news_map):
         if neg and neg != "-":
             md.append("**ปัจจัยลบ (Negative Factors):**")
             for b in neg: md.append(f"- {b}")
-
         items = news_map.get(f["ticker"], [])
         if items:
             md.append("\n**หัวข้อข่าวล่าสุด:**")
@@ -465,18 +431,14 @@ def render_report(date_str, overview, features, ai_json, news_map):
                 if link: md.append(f"- [{title}]({link}) — {src} ({pub})")
                 else:    md.append(f"- {title} — {src} ({pub})")
         md.append("")
-
     notes = ai_json.get("notes","")
     if notes:
         md.append("## หมายเหตุจากโมเดล\n")
         md.append(notes); md.append("")
-
     md.append("---")
     md.append("**หมายเหตุ/ข้อจำกัด:** รายงานนี้สร้างโดยอัลกอริทึมและ LLM เพื่อการศึกษาเท่านั้น มิใช่คำแนะนำการลงทุน")
     return "\n".join(md)
 
-
-# ======================= Blocks =======================
 def to_overview_block(tickers, lookback_days, delay_sec=0.0):
     arr = []
     for t in tickers:
@@ -490,15 +452,12 @@ def to_overview_block(tickers, lookback_days, delay_sec=0.0):
             time.sleep(delay_sec)
     return arr
 
-
-# ======================= Main =======================
 def main():
     config = load_config("config.yml")
     tz = config.get("timezone", "Asia/Bangkok")
     now = datetime.now(ZoneInfo(tz))
     if config.get("skip_if_weekend", True) and now.weekday() >= 5:
         print("Weekend — skipped."); return
-
     lookback = int(config.get("lookback_days", 260))
     tickers = config.get("tickers")
     indices = config.get("indices")
@@ -507,15 +466,11 @@ def main():
     cfg_news = config.get("news", {"enable": True, "lookback_days": 2, "per_ticker": 3})
     delay = float(config.get("per_call_delay_sec", 0.0))
     locale_news = config.get("google_news_locale", {"hl":"en-US","gl":"US","ceid":"US:en"})
-
-    # 1) ภาพรวมตลาด
     overview = {
         "indices": to_overview_block(indices, lookback, delay_sec=delay),
         "commodities": to_overview_block(commodities, lookback, delay_sec=delay),
         "fx": to_overview_block(fx, lookback, delay_sec=delay),
     }
-
-    # 2) คุณลักษณะ/ตัวชี้วัดของหุ้นหลัก
     features = []
     hist_cache = {}
     for t in tickers:
@@ -525,9 +480,7 @@ def main():
         if f: features.append(f)
         if delay > 0:
             time.sleep(delay)
-
     if not features:
-        # เขียนรายงานสั้น ๆ เพื่อไม่ให้ workflow ล้ม
         ensure_dir("reports")
         report_date = now.strftime("%Y-%m-%d")
         msg = ("# Daily AI Stock Insight — {d}\n\n"
@@ -535,8 +488,6 @@ def main():
         open(f"reports/{report_date}.md","w",encoding="utf-8").write(msg)
         open("reports/latest.md","w",encoding="utf-8").write(msg)
         print("Report generated (empty)."); return
-
-    # 3) ข่าวจาก Google News RSS
     news_map = {}
     if cfg_news.get("enable", True):
         per_ticker = int(cfg_news.get("per_ticker", 3))
@@ -548,29 +499,21 @@ def main():
             news_map[t] = items
             if delay > 0:
                 time.sleep(delay)
-
-    # 4) สร้าง prompt และเรียก Gemini
     sys, usr = build_ai_prompt(config, overview, features, news_map)
     model_name = config.get("gemini_model", "gemini-2.5-flash")
     ai_json = call_gemini(model_name, sys, usr)
-
-    # 5) วาดกราฟ + ออกรายงาน
     report_date = now.strftime("%Y-%m-%d")
     ensure_dir("reports")
-
     if config.get("charts", {}).get("enable", True) and plt is not None:
         for t in tickers:
             df = hist_cache.get(t)
             if df is None or df.empty: continue
             out_png = f"reports/{report_date}_{t}.png"
             plot_stock(t, df, out_png)
-
     md = render_report(report_date, overview, features, ai_json, news_map)
     with open(f"reports/{report_date}.md","w",encoding="utf-8") as f: f.write(md)
     with open("reports/latest.md","w",encoding="utf-8") as f: f.write(md)
     print("Report generated:", report_date)
-
-    # 6) ส่งข้อมูลเข้า Google Sheet (ออปชัน)
     sheet_id = os.getenv("SHEET_ID", "").strip()
     if sheet_id and os.path.exists("gcp_service_account.json"):
         try:
@@ -582,7 +525,5 @@ def main():
     else:
         print("Skip Google Sheet export (missing SHEET_ID or key file).")
 
-
 if __name__ == "__main__":
     main()
-
